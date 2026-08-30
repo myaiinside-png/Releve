@@ -72,6 +72,17 @@
     width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:#fff}
   .field textarea{min-height:70px;resize:vertical}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .sug{border:1px solid var(--line);border-radius:10px;margin-top:6px;overflow:hidden;background:#fff}
+  .sug button{display:block;width:100%;text-align:left;padding:10px 12px;border-bottom:1px solid var(--line)}
+  .sug button:last-child{border-bottom:none}
+  .sug button:active{background:#EAF3F1}
+  .sug b{font-weight:600;font-size:14px;color:var(--ink)}
+  .sug small{display:block;color:var(--mut);font-size:12px}
+  .geostat{font-size:13px;color:var(--mut);margin-top:8px;display:flex;align-items:center;gap:6px;min-height:22px}
+  .ok-dot{width:9px;height:9px;border-radius:50%;background:var(--ok);flex:none}
+  .linkbtn{color:var(--verdigris);text-decoration:underline;font-size:13px}
+  .subfields{margin-top:8px}
+  .subfields summary{font-size:12.5px;color:var(--mut);cursor:pointer;letter-spacing:.02em}
 
   /* Alert chips on a patient */
   .chip{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;font-weight:600;
@@ -198,6 +209,7 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://unpkg.com/protomaps-leaflet@5.0.0/dist/protomaps-leaflet.js"></script>
 <script>
 /* =========================================================================
    Relève — v1 (palier A : local-first, souverain, partage par bundle chiffré)
@@ -326,6 +338,34 @@ const initials=p=>((p.prenom||' ')[0]+(p.nom||' ')[0]).toUpperCase();
 const patient=id=>S.patients.find(p=>p.id===id);
 const todayISO=()=>new Date().toISOString().slice(0,10);
 
+/* ---------- Géocodage : Base Adresse Nationale (service public FR) ----------
+   On n'envoie QUE la chaîne d'adresse — jamais le nom, la pathologie, ni le
+   contexte patient. Résultat mis en cache dans la fiche (lat/lng) : chaque
+   adresse n'est interrogée qu'une fois, puis plus jamais. Biais haut pays bigouden. */
+const HOME=[47.99,-4.39]; // haut pays bigouden : Plozévet, Mahalon, Guiler-sur-Goyen ↔ Landudec (défaut cartes + biais géocodage)
+/* Carte hors-ligne : une fois bigouden.pmtiles déposé à la racine, passe
+   USE_PMTILES à true. La carte se rend alors depuis ce seul fichier (vecteur,
+   polices système), et fonctionne hors-ligne une fois en cache. Tant que
+   c'est false, on retombe sur les tuiles OSM en ligne. */
+const USE_PMTILES=false;
+const PMTILES_URL='bigouden.pmtiles';
+function baseLayer(){
+  if(USE_PMTILES && typeof protomapsL!=='undefined'){
+    return protomapsL.leafletLayer({url:PMTILES_URL, flavor:'light', lang:'fr', attribution:'© OpenStreetMap · Protomaps'});
+  }
+  return L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'});
+}
+const BAN='https://api-adresse.data.gouv.fr/search/';
+async function banSearch(q){
+  const url=`${BAN}?q=${encodeURIComponent(q)}&limit=5&lat=${HOME[0]}&lon=${HOME[1]}`;
+  const r=await fetch(url);
+  if(!r||!r.ok)throw new Error('ban');
+  const j=await r.json();
+  return (j.features||[]).map(f=>({
+    label:f.properties.label, ctx:f.properties.context||'',
+    lat:f.geometry.coordinates[1], lng:f.geometry.coordinates[0]}));
+}
+
 /* ======================= VUE TOURNÉE ======================= */
 let curDate=todayISO();
 function tourneeFor(d){return S.tournees.find(t=>t.date===d);}
@@ -366,7 +406,7 @@ function renderTournee(){
       <button class="btn ghost" id="addStop" style="margin-top:12px">+ Ajouter un patient à la tournée</button>
     </div>
     <div class="card"><div class="eyebrow">Carte du fil</div><div id="map"></div>
-      <div class="muted" style="font-size:12.5px;margin-top:8px">Les patients sans coordonnées (lat/lng dans la fiche) n'apparaissent pas encore sur la carte.</div>
+      <div class="geostat" id="geoMiss" style="margin-top:10px"></div>
     </div>`;
 
   document.getElementById('dpick').onchange=e=>{curDate=e.target.value;renderTournee();};
@@ -376,6 +416,25 @@ function renderTournee(){
   v.querySelectorAll('[data-down]').forEach(b=>b.onclick=()=>moveStop(+b.dataset.down,1));
   v.querySelectorAll('[data-rm]').forEach(b=>b.onclick=()=>{const t=tourneeFor(curDate);t.stops.splice(+b.dataset.rm,1);save();renderTournee();});
   drawMap(stops);
+  wireGeoMiss(stops);
+}
+function wireGeoMiss(stops){
+  const el=document.getElementById('geoMiss');if(!el)return;
+  const missing=stops.map(patient).filter(p=>p&&p.adresse&&!(p.lat&&p.lng));
+  const noAddr=stops.map(patient).filter(p=>p&&!p.adresse).length;
+  if(!missing.length){
+    el.textContent=noAddr?`${noAddr} arrêt(s) sans adresse — à compléter dans la fiche.`:'';
+    return;
+  }
+  el.innerHTML=`<button type="button" class="linkbtn" id="geoAll">Localiser ${missing.length} adresse(s) manquante(s)</button>`;
+  el.querySelector('#geoAll').onclick=async()=>{
+    el.textContent='Localisation…';let ok=0;
+    for(const p of missing){
+      try{const res=await banSearch(p.adresse);if(res[0]){p.lat=res[0].lat.toFixed(6);p.lng=res[0].lng.toFixed(6);ok++;}}catch(e){}
+    }
+    save();renderTournee();
+    if(ok<missing.length)setTimeout(()=>{const e2=document.getElementById('geoMiss');if(e2)e2.textContent=`${missing.length-ok} adresse(s) introuvable(s) — à ajuster à la main dans la fiche.`;},50);
+  };
 }
 function ensureTour(){let t=tourneeFor(curDate);if(!t){t={id:uid(),date:curDate,infirmier:S.settings.moi||'',stops:[]};S.tournees.push(t);}return t;}
 function moveStop(i,dir){const t=tourneeFor(curDate);const j=i+dir;[t.stops[i],t.stops[j]]=[t.stops[j],t.stops[i]];save();renderTournee();}
@@ -383,8 +442,7 @@ function moveStop(i,dir){const t=tourneeFor(curDate);const j=i+dir;[t.stops[i],t
 let MAP=null,LAYER=null;
 function drawMap(stops){
   const el=document.getElementById('map');if(!el||typeof L==='undefined')return;
-  if(!MAP){MAP=L.map(el,{zoomControl:true});L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    {maxZoom:19,attribution:'© OpenStreetMap'}).addTo(MAP);MAP.setView([48.07,-4.60],11);} // Cap Sizun
+  if(!MAP){MAP=L.map(el,{zoomControl:true});baseLayer().addTo(MAP);MAP.setView(HOME,12);} // haut pays bigouden
   if(LAYER)LAYER.remove();LAYER=L.layerGroup().addTo(MAP);
   const pts=[];
   stops.forEach((pid,i)=>{const p=patient(pid);if(p&&p.lat&&p.lng){
@@ -544,10 +602,22 @@ function editPatient(id){
       <div class="field" style="margin-top:0"><label>Prénom</label><input id="f_prenom" value="${esc(p.prenom)}"></div>
       <div class="field" style="margin-top:0"><label>Nom</label><input id="f_nom" value="${esc(p.nom)}"></div>
     </div>
-    <div class="field"><label>Adresse</label><input id="f_adresse" value="${esc(p.adresse)}"></div>
-    <div class="grid2">
-      <div class="field"><label>Latitude</label><input id="f_lat" inputmode="decimal" value="${esc(p.lat)}"></div>
-      <div class="field"><label>Longitude</label><input id="f_lng" inputmode="decimal" value="${esc(p.lng)}"></div>
+    <div class="field"><label>Adresse</label>
+      <input id="f_adresse" value="${esc(p.adresse)}" autocomplete="off" placeholder="N°, rue, lieu-dit, commune…">
+    </div>
+    <div class="field"><label>Point sur la carte</label>
+      <div class="row" style="gap:8px;margin-bottom:8px">
+        <button type="button" class="btn sm" id="gpsBtn" style="width:auto">Ma position (GPS)</button>
+        <input id="addrCenter" placeholder="ou chercher une adresse…" style="flex:1;padding:9px 11px;border:1px solid var(--line);border-radius:9px" enterkeyhint="search">
+      </div>
+      <div id="pmap" style="height:210px;border:1px solid var(--line);border-radius:11px"></div>
+      <div class="geostat" id="coordStat"></div>
+      <details class="subfields"><summary>Coordonnées exactes</summary>
+        <div class="grid2" style="margin-top:8px">
+          <div class="field" style="margin-top:0"><label>Latitude</label><input id="f_lat" inputmode="decimal" value="${esc(p.lat)}"></div>
+          <div class="field" style="margin-top:0"><label>Longitude</label><input id="f_lng" inputmode="decimal" value="${esc(p.lng)}"></div>
+        </div>
+      </details>
     </div>
     <div class="grid2">
       <div class="field"><label>Code porte</label><input id="f_code" value="${esc(p.codePorte)}"></div>
@@ -576,6 +646,51 @@ function editPatient(id){
   drawAlerts();
   s.querySelector('#a_add').onclick=()=>{const txt=s.querySelector('#a_txt').value.trim();if(!txt)return;
     alertes.push({niveau:s.querySelector('#a_niv').value,texte:txt});s.querySelector('#a_txt').value='';drawAlerts();};
+
+  /* --- point sur la carte : GPS + tap + recherche d'adresse (secours) --- */
+  (function(){
+    const latI=s.querySelector('#f_lat'), lngI=s.querySelector('#f_lng'),
+          stat=s.querySelector('#coordStat'), gpsBtn=s.querySelector('#gpsBtn'),
+          center=s.querySelector('#addrCenter');
+    const has=()=>latI.value&&lngI.value;
+    let pm=null, marker=null;
+    const start = has()?[+latI.value,+lngI.value]:HOME; // haut pays bigouden par défaut
+    function setStat(msg){ stat.innerHTML = (msg!==undefined) ? msg
+        : (has()?`<span class="ok-dot"></span><span class="mono">${(+latI.value).toFixed(5)}, ${(+lngI.value).toFixed(5)}</span>`
+               : `Touche la carte, ou capte ta position sur place.`); }
+    function place(ll,zoom){
+      latI.value=(+ll[0]).toFixed(6);lngI.value=(+ll[1]).toFixed(6);
+      if(!pm)return;
+      if(marker){marker.setLatLng(ll);}
+      else{marker=L.marker(ll,{draggable:true}).addTo(pm);
+        marker.on('dragend',()=>{const q=marker.getLatLng();latI.value=q.lat.toFixed(6);lngI.value=q.lng.toFixed(6);setStat();});}
+      if(zoom)pm.setView(ll,zoom); setStat();
+    }
+    if(typeof L==='undefined'){stat.textContent='Carte indisponible.';}
+    else{
+      pm=L.map(s.querySelector('#pmap')).setView(start, has()?16:12);
+      baseLayer().addTo(pm);
+      if(has())place(start);
+      pm.on('click',e=>place([e.latlng.lat,e.latlng.lng]));
+      setTimeout(()=>pm.invalidateSize(),140);
+      setStat();
+    }
+    gpsBtn.onclick=()=>{
+      if(!navigator.geolocation){setStat('GPS indisponible sur cet appareil.');return;}
+      setStat('Localisation GPS…');
+      navigator.geolocation.getCurrentPosition(
+        pos=>place([pos.coords.latitude,pos.coords.longitude],17),
+        ()=>setStat('GPS refusé ou indisponible (autorise la localisation, en HTTPS).'),
+        {enableHighAccuracy:true,timeout:10000,maximumAge:0});
+    };
+    center.addEventListener('keydown',async e=>{
+      if(e.key!=='Enter')return; e.preventDefault();
+      const q=center.value.trim(); if(q.length<4)return;
+      setStat('Recherche…');
+      try{const res=await banSearch(q); res[0]?place([res[0].lat,res[0].lng],16):setStat('Adresse introuvable.');}
+      catch(err){setStat('Recherche indisponible (hors-ligne ?).');}
+    });
+  })();
 
   s.querySelector('#savePat').onclick=()=>{
     const g=id=>s.querySelector(id).value.trim();
