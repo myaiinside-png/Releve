@@ -347,7 +347,7 @@ const HOME=[47.99,-4.39]; // haut pays bigouden : Plozévet, Mahalon, Guiler-sur
    USE_PMTILES à true. La carte se rend alors depuis ce seul fichier (vecteur,
    polices système), et fonctionne hors-ligne une fois en cache. Tant que
    c'est false, on retombe sur les tuiles OSM en ligne. */
-const USE_PMTILES=false;
+const USE_PMTILES=true;
 const PMTILES_URL='bigouden.pmtiles';
 function baseLayer(){
   if(USE_PMTILES && typeof protomapsL!=='undefined'){
